@@ -1,0 +1,20 @@
+[project]
+name = "playwright-webrun"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.14.2",
+    "fastapi>=0.120.4",
+    "gunicorn>=23.0.0",
+    "loguru>=0.7.3",
+    "playwright>=1.55.0",
+    "pydantic>=2.12.3",
+    "pydantic-settings>=2.11.0",
+    "redis[hiredis]>=7.0.1",
+    "sentry-sdk>=2.43.0",
+    "slowapi>=0.1.9",
+    "uvicorn>=0.38.0",
+    "uvloop>=0.22.1",
+]
