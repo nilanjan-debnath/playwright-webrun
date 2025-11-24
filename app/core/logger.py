@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-# import logging
+
 import sentry_sdk
 from sentry_sdk.integrations.loguru import LoguruIntegration
 from app.core.config import settings
@@ -23,9 +23,8 @@ def replace_name_filter(record):
 
 
 def setup_logger():
-    # Remove any default handlers (avoid duplicate logs)
     loguru_logger.remove()
-    # --- 1. Console Handler: simple human-readable output ---
+
     loguru_logger.add(
         sys.stdout,
         level=settings.log_level,
@@ -38,7 +37,6 @@ def setup_logger():
     )
 
     if settings.debug:
-        # --- 2. File Handler: structured JSON logs ---
         loguru_logger.add(
             "logs/app.log",
             serialize=True,
@@ -63,7 +61,6 @@ def setup_logger():
     return loguru_logger
 
 
-# initializing logger from get_logger function with cache
 @lru_cache(maxsize=1)
 def get_logger():
     return setup_logger()
@@ -76,19 +73,16 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
 
-        # Pre-request log
         logger.info(f"→ {request.method} {request.url.path}")
 
         try:
             response = await call_next(request)
         except Exception as e:
-            # Log unhandled exceptions
             logger.exception(f"Unhandled error: {e}")
             raise
         finally:
             process_time = time.time() - start_time
 
-            # Post-request log
             logger.info(
                 f"← {request.method} {request.url.path} | "
                 f"Status: {getattr(response, 'status_code', 'N/A')} | "
@@ -96,4 +90,3 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             )
 
         return response
-    

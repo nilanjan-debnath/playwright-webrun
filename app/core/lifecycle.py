@@ -1,46 +1,50 @@
-from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from slowapi.errors import RateLimitExceeded
-from slowapi import _rate_limit_exceeded_handler
+from fastapi import FastAPI
 from playwright.async_api import async_playwright, Browser, Playwright
 from app.core.logger import logger
-from app.core.ratelimiter import limiter
 
+# Store instances in a dictionary to be attached to app.state
 playwright_state = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- Startup ---
+    """
+    Manages the Playwright browser lifecycle.
+    """
     logger.info("FastAPI app starting up...")
     try:
-        # setup ratelimiter
-        app.state.limiter = limiter
-        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-        logger.info("Rate limiter setup complete.")
-
         logger.info("Starting Playwright...")
         playwright: Playwright = await async_playwright().start()
-        browser: Browser = await playwright.chromium.launch()
-        
+
+        # Add the stealth arguments from your debug.py
+        browser_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+        ]
+
+        browser: Browser = await playwright.chromium.launch(args=browser_args)
+
         # Store instances in the state dictionary
         playwright_state["playwright"] = playwright
         playwright_state["browser"] = browser
-        
+
         # Make them available in app.state
         app.state.playwright = playwright
         app.state.browser = browser
 
-        logger.info("Playwright started and browser launched successfully.")
-
-        # Yield control to the application
+        logger.info(
+            f"Playwright started and browser launched successfully with args: {browser_args}"
+        )
         yield
+
     finally:
-        # --- Shutdown ---
         logger.info("FastAPI app shutting down...")
         browser = playwright_state.get("browser")
         playwright = playwright_state.get("playwright")
-        
+
         if browser:
             logger.info("Closing browser...")
             await browser.close()

@@ -9,4 +9,5 @@ def get_browser(request: Request) -> Browser:
     """
     return request.app.state.browser
 
+
 AppBrowser = Annotated[Browser, Depends(get_browser)]

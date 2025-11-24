@@ -5,6 +5,9 @@ from app.core.ratelimiter import limiter
 from app.core.lifecycle import lifespan
 from app.core.logger import logger, LoggingMiddleware
 from app.page.v1.controllers.routes import router as page_v1_router
+from app.playwright.browser import AppBrowser
+from app.page.v1.services.page_content import get_page_content
+from fastapi import HTTPException, status
 
 
 # Initialize the FastAPI app with the lifespan manager
@@ -40,5 +43,14 @@ async def root(request: Request):
 
 @app.get("/healthz")
 @limiter.limit(settings.ratelimit_guest)
-async def db_check(request: Request):
-    return {"status": "ok"}
+async def health_check(request: Request, browser: AppBrowser):
+    try:
+        # Attempt to scrape a simple, reliable page to verify Playwright is working
+        await get_page_content("http://example.com", browser)
+        return {"status": "ok", "playwright": "healthy"}
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Health check failed: {e}",
+        )
