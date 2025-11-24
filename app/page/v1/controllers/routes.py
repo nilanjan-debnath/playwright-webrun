@@ -7,7 +7,7 @@ from app.playwright.browser import AppBrowser
 from playwright.async_api import Error as PlaywrightError
 from app.core.logger import logger
 from app.core.config import settings
-from app.core.limiter import limiter
+from app.core.ratelimiter import limiter
 
 router = APIRouter(prefix="/api/v1/page", tags=["user", "v1"])
 
