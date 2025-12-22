@@ -49,6 +49,8 @@ def setup_logger():
     else:
         sentry_sdk.init(
             dsn=settings.sentry_dsn,
+            send_default_pii=True,
+            traces_sample_rate=1.0,
             integrations=[
                 LoguruIntegration(
                     level=settings.log_level,  # Capture logs from INFO level and above
