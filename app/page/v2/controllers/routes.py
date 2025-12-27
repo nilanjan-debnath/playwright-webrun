@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request, status, HTTPException, Query
 from pydantic import AnyHttpUrl
 from app.page.v2.services.page_content import get_page_content
-from app.playwright.browser import AppBrowser
+from app.playwright.browser import AppBrowser, AppStealth
 from playwright.async_api import Error as PlaywrightError
 from app.core.logger import logger
 from app.core.config import settings
@@ -20,13 +20,19 @@ async def get_page(
     request: Request,
     url: AnyHttpUrl,
     browser: AppBrowser,
+    stealth: AppStealth,  # Add stealth dependency
     format: str = Query("text", description="Output format: 'text' or 'html'"),
 ) -> str:
     """
-    Fetches the content of a single page.
+    Fetches the content of a single page using stealth mode.
     """
     try:
-        content = await get_page_content(str(url), browser, format)
+        content = await get_page_content(
+            str(url),
+            browser,
+            format,
+            stealth=stealth,  # Pass stealth instance
+        )
         return content
     except PlaywrightError as e:
         logger.error(f"Playwright error for {url}: {e.message}")
@@ -34,10 +40,10 @@ async def get_page(
             status_code=status.HTTP_408_REQUEST_TIMEOUT,
             detail=f"Playwright error: {e.message}",
         )
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"An unexpected error occurred for {url}: {e}", exc_info=True)
+        logger.error(f"Unexpected error for {url}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred.",

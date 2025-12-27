@@ -1,42 +1,48 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from app.playwright.browser import start_browser
+from playwright.async_api import async_playwright
+from app.playwright.browser import BROWSER_ARGS, get_stealth_instance
 from app.core.logger import logger
-
-# Store instances in a dictionary to be attached to app.state
-playwright_state = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Manages the Playwright browser lifecycle.
+    Manages the Playwright browser lifecycle with stealth.
     """
     logger.info("FastAPI app starting up...")
+
+    stealth = get_stealth_instance()
+
     try:
-        logger.info("Starting Playwright...")
-        playwright, browser = await start_browser()
+        logger.info("Starting Playwright with Stealth...")
 
-        # Store instances in the state dictionary
-        playwright_state["playwright"] = playwright
-        playwright_state["browser"] = browser
+        # Use stealth as async context manager
+        async with stealth.use_async(async_playwright()) as playwright:
+            browser = await playwright.chromium.launch(
+                args=BROWSER_ARGS,
+                headless=True,
+                timeout=60000,
+            )
 
-        # Make them available in app.state
-        app.state.playwright = playwright
-        app.state.browser = browser
+            # Store in app state
+            app.state.playwright = playwright
+            app.state.browser = browser
+            app.state.stealth = stealth
 
-        logger.info("Playwright started and browser launched successfully")
-        yield
+            logger.info("Playwright with Stealth started successfully")
 
-    finally:
-        logger.info("FastAPI app shutting down...")
-        browser = playwright_state.get("browser")
-        playwright = playwright_state.get("playwright")
+            yield
 
-        if browser:
+            # Cleanup
             logger.info("Closing browser...")
             await browser.close()
-        if playwright:
-            logger.info("Stopping Playwright...")
-            await playwright.stop()
+
+        logger.info("Playwright stopped")
+
+    except Exception as e:
+        logger.error(f"Error in lifespan: {e}", exc_info=True)
+        raise
+
+    finally:
         logger.info("Cleanup finished.")
