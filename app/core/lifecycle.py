@@ -20,9 +20,23 @@ async def lifespan(app: FastAPI):
         # Add the stealth arguments from your debug.py
         browser_args = [
             "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-web-security",
             "--disable-setuid-sandbox",
+            "--no-sandbox",
             "--disable-dev-shm-usage",
+            "--disable-accelerated-2d-canvas",
+            "--disable-gpu",
+            "--window-size=1920,1080",
+            "--start-maximized",
+            "--ignore-certificate-errors",
+            "--allow-running-insecure-content",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-infobars",
+            "--hide-scrollbars",
+            "--mute-audio",
         ]
 
         browser: Browser = await playwright.chromium.launch(args=browser_args)

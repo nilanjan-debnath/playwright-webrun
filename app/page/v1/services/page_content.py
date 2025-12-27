@@ -1,5 +1,5 @@
 import asyncio
-from bs4 import BeautifulSoup
+import trafilatura
 from playwright.async_api import (
     Browser,
     Page,
@@ -11,25 +11,16 @@ from app.core.logger import logger
 
 
 class ScrapingError(Exception):
-    """Custom exception for scraping failures."""
-
     pass
 
 
 async def run(browser: Browser, url: str, max_retries: int = 2) -> str:
-    """
-    Uses the persistent browser to create a new, isolated context
-    and page for scraping with retry logic and fallback strategies.
-    """
-    last_exception: Exception | None = None
-
-    # Different wait strategies to try (in order of strictness)
-    wait_strategies = ["domcontentloaded", "commit"]
+    # 1. CHANGED: 'networkidle' is much better for dynamic text than 'domcontentloaded'
+    wait_strategies = ["networkidle", "domcontentloaded", "load"]
 
     for attempt in range(max_retries + 1):
         context = None
         page = None
-
         try:
             logger.debug(f"Attempt {attempt + 1}/{max_retries + 1} for {url}")
 
@@ -40,176 +31,137 @@ async def run(browser: Browser, url: str, max_retries: int = 2) -> str:
                 java_script_enabled=True,
             )
 
-            # Block unnecessary resources to speed up loading
+            # Block media to save bandwidth, but be careful blocking too much
+            # (sometimes blocking fonts/icons breaks page scripts)
             await context.route(
-                "**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff,woff2,ttf,otf}",
+                "**/*.{png,jpg,jpeg,gif,webp}",  # Removed fonts/svg/ico to be safer
                 lambda route: route.abort(),
             )
 
             page = await context.new_page()
             await stealth_async(page)
 
-            # Try navigation with fallback wait strategies
             html = await _navigate_with_fallback(page, url, wait_strategies)
 
             if html and len(html.strip()) > 500:
                 return html
             else:
+                # If content is short, it might be a CAPTCHA or error page
                 raise ScrapingError(f"Retrieved content too short ({len(html)} chars)")
 
-        except PlaywrightTimeoutError as e:
-            last_exception = e
-            logger.warning(f"Timeout on attempt {attempt + 1} for {url}: {e}")
-
-        except PlaywrightError as e:
-            last_exception = e
-            logger.warning(f"Playwright error on attempt {attempt + 1} for {url}: {e}")
-
-        except Exception as e:
-            last_exception = e
-            logger.error(f"Unexpected error on attempt {attempt + 1} for {url}: {e}")
-
-        finally:
+        except (PlaywrightTimeoutError, PlaywrightError, Exception) as e:
+            logger.warning(f"Error on attempt {attempt + 1}: {e}")
             await _safe_cleanup(page, context)
+            if attempt < max_retries:
+                await asyncio.sleep(2**attempt)
 
-        # Exponential backoff before retry
-        if attempt < max_retries:
-            wait_time = 2**attempt
-            logger.debug(f"Waiting {wait_time}s before retry...")
-            await asyncio.sleep(wait_time)
+        # Cleanup if success to avoid leaks
+        await _safe_cleanup(page, context)
 
-    raise ScrapingError(
-        f"Failed to scrape {url} after {max_retries + 1} attempts"
-    ) from last_exception
+    raise ScrapingError(f"Failed to scrape {url} after {max_retries + 1} attempts")
 
 
 async def _navigate_with_fallback(
     page: Page, url: str, wait_strategies: list[str]
 ) -> str:
-    """
-    Attempts navigation with progressively less strict wait conditions.
-    """
-    last_error: Exception | None = None
-
     for strategy in wait_strategies:
         try:
-            logger.debug(f"Trying navigation with wait_until='{strategy}'")
-
-            response = await page.goto(
-                url=url,
-                timeout=45000,  # 45 seconds
-                wait_until=strategy,
-            )
+            logger.debug(f"Navigating with wait_until='{strategy}'")
+            response = await page.goto(url, timeout=30000, wait_until=strategy)
 
             if response and response.status >= 400:
                 logger.warning(f"HTTP {response.status} for {url}")
 
-            # Try to wait for body, but don't fail if timeout
-            await _wait_for_content(page)
+            # 2. NEW: Scroll down to trigger lazy loading (Vital for modern sites)
+            await _auto_scroll(page)
+
+            # 3. NEW: Wait for text stability instead of just a generic selector
+            await _wait_for_text_content(page)
 
             return await page.content()
 
-        except PlaywrightTimeoutError as e:
-            last_error = e
-            logger.debug(f"Strategy '{strategy}' timed out, trying next...")
-
-            # Even if goto times out, try to get whatever content loaded
-            try:
-                html = await page.content()
-                if html and "<body" in html.lower():
-                    logger.info(f"Partial content retrieved despite timeout for {url}")
-                    return html
-            except Exception:
-                pass
-
-            continue
-
-    raise last_error or PlaywrightTimeoutError(
-        f"All navigation strategies failed for {url}"
-    )
-
-
-async def _wait_for_content(page: Page) -> None:
-    """
-    Waits for page content with multiple fallback selectors.
-    Non-blocking - logs warning but doesn't raise on timeout.
-    """
-    selectors_to_try = [
-        ("body", 10000),
-        ("main", 5000),
-        ("div", 5000),
-    ]
-
-    for selector, timeout in selectors_to_try:
-        try:
-            await page.wait_for_selector(selector, state="visible", timeout=timeout)
-            logger.debug(f"Selector '{selector}' found and visible")
-
-            # Brief pause for any dynamic content
-            await asyncio.sleep(0.5)
-            return
-
         except PlaywrightTimeoutError:
-            logger.debug(f"Selector '{selector}' not visible within {timeout}ms")
+            logger.debug(f"Strategy '{strategy}' timed out, trying next...")
             continue
 
-    logger.warning("No content selectors matched, proceeding with available content")
+    # Last ditch effort: if all strategies fail, return whatever we have
+    try:
+        return await page.content()
+    except Exception as e:
+        logger.error(
+            f"Failed to collect page content tying all navigation strategies. \n\nException: \n{e}"
+        )
+        raise PlaywrightTimeoutError(f"All navigation strategies failed for {url}")
+
+
+async def _auto_scroll(page: Page):
+    """
+    Slowly scrolls to the bottom of the page to trigger lazy loading.
+    """
+    try:
+        # Get scroll height
+        last_height = await page.evaluate("document.body.scrollHeight")
+
+        # Scroll in chunks
+        for i in range(3):  # Scroll 3 times max to save time
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1000)  # Wait for content to load
+
+            new_height = await page.evaluate("document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
+
+        # Scroll back to top (some sites hide content if you are at the bottom)
+        await page.evaluate("window.scrollTo(0, 0)")
+    except Exception as e:
+        logger.warning(f"Scroll failed: {e}")
+
+
+async def _wait_for_text_content(page: Page) -> None:
+    """
+    Waits until the page seems to have meaningful text content.
+    """
+    try:
+        # Wait for at least one paragraph with some length
+        # This prevents grabbing the page before the main article loads
+        await page.wait_for_selector("p, article, [role='main']", timeout=5000)
+    except Exception as e:
+        logger.warning(
+            f"Timeout waiting for selector=\"p, article, [role='main']\" \n\nException: \n{e}"
+        )
+        pass
+
+    # Give a final "settle" time for hydration (React/Vue)
+    await page.wait_for_timeout(2000)
 
 
 async def _safe_cleanup(page: Page | None, context: any) -> None:
-    """
-    Safely closes page and context, suppressing any errors.
-    """
     if page:
         try:
             await page.close()
         except Exception as e:
-            logger.debug(f"Error closing page: {e}")
-
+            logger.warning(f"Failed to close the page \n\nException: \n{e}")
     if context:
         try:
             await context.close()
         except Exception as e:
-            logger.debug(f"Error closing context: {e}")
-        else:
-            logger.debug("Browser context closed.")
+            logger.warning(f"Failed to close context \n\nException: \n{e}")
 
 
 async def get_page_content(
     url: str, browser: Browser, format: str = "text", max_retries: int = 2
 ) -> str:
-    """
-    Main service function to get page content.
-
-    Args:
-        url: The URL to scrape
-        browser: Playwright browser instance
-        format: 'text' or 'html'
-        max_retries: Number of retry attempts
-
-    Returns:
-        Page content as text or HTML
-
-    Raises:
-        ScrapingError: If scraping fails after all retries
-    """
     html = await run(browser, url=url, max_retries=max_retries)
 
     if format.lower() == "html":
-        logger.info(f"Web content (HTML) collected successfully for {url}")
         return html
 
-    soup = BeautifulSoup(html, "html.parser")
+    content = trafilatura.extract(
+        html, include_links=False, include_images=False, include_comments=False
+    )
 
-    # Remove script and style elements for cleaner text
-    for element in soup(["script", "style", "noscript", "header", "footer", "nav"]):
-        element.decompose()
+    if not content:
+        return "No main content extracted."
 
-    content: str = soup.get_text(separator="\n", strip=True)
-
-    # Clean up excessive whitespace
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
-    content = "\n".join(lines)
-
-    logger.info(f"Web content (text) collected successfully for {url}")
     return content

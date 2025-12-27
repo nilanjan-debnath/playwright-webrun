@@ -55,7 +55,7 @@ USER 1000
 EXPOSE 8000
 
 # Health check (assuming you add a /healthz endpoint to your FastAPI app)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8000/healthz || exit 1
 
 # Set the container's entrypoint

@@ -132,8 +132,12 @@ async def get_network_logs(
         logger.debug(f"Waiting for {wait_seconds}s for delayed scripts...")
         # Use non-blocking sleep!
         await asyncio.sleep(wait_seconds)
+        page_title = "N/A"
+        try:
+            page_title = await page.title()
+        except Exception as e:
+            logger.warning(f"Could not get page title: {e}")
 
-        page_title = await page.title()
         final_url = page.url
 
         logger.info(f"Log collection finished for {url}. Total logs: {len(logs)}")
