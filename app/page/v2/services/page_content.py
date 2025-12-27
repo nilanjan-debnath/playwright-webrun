@@ -11,6 +11,7 @@ from playwright.async_api import (
     Request as PlaywrightRequest,
     Response,
 )
+from playwright_stealth import Stealth
 from fastapi import HTTPException, status
 import trafilatura
 from app.core.logger import logger
@@ -75,105 +76,26 @@ GENERIC_CONTENT_SELECTORS = [
     ".main-content",
 ]
 
-# Stealth JavaScript
-STEALTH_SCRIPT = """
-() => {
-    Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
-        configurable: true,
-    });
-
-    Object.defineProperty(navigator, 'plugins', {
-        get: () => {
-            const plugins = [
-                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
-            ];
-            Object.setPrototypeOf(plugins, PluginArray.prototype);
-            return plugins;
-        },
-        configurable: true,
-    });
-
-    Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
-        configurable: true,
-    });
-
-    if (!window.chrome) window.chrome = {};
-    window.chrome.runtime = { id: undefined };
-}
-"""
-
-# DOM cleaning script - removes noise elements
+# DOM cleaning script
 DOM_CLEANING_SCRIPT = """
 () => {
-    // Elements to completely remove
     const removeSelectors = [
-        'script',
-        'style',
-        'noscript',
-        'iframe',
-        'svg',
-        'canvas',
-        'video',
-        'audio',
-        'nav',
-        'header',
-        'footer',
-        'aside',
-        '[role="navigation"]',
-        '[role="banner"]',
-        '[role="contentinfo"]',
-        '[role="complementary"]',
+        'script', 'style', 'noscript', 'iframe', 'svg', 'canvas', 'video', 'audio',
+        'nav', 'header', 'footer', 'aside',
+        '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]', '[role="complementary"]',
         '[aria-hidden="true"]',
-        '[class*="cookie"]',
-        '[class*="Cookie"]',
-        '[class*="banner"]',
-        '[class*="Banner"]',
-        '[class*="popup"]',
-        '[class*="Popup"]',
-        '[class*="modal"]',
-        '[class*="Modal"]',
-        '[class*="overlay"]',
-        '[class*="Overlay"]',
-        '[class*="sidebar"]',
-        '[class*="Sidebar"]',
-        '[class*="footer"]',
-        '[class*="Footer"]',
-        '[class*="header"]',
-        '[class*="Header"]',
-        '[class*="navbar"]',
-        '[class*="Navbar"]',
-        '[class*="nav-"]',
-        '[class*="Nav-"]',
-        '[class*="menu"]',
-        '[class*="Menu"]',
-        '[class*="share"]',
-        '[class*="Share"]',
-        '[class*="social"]',
-        '[class*="Social"]',
-        '[class*="breadcrumb"]',
-        '[class*="Breadcrumb"]',
-        '[class*="related"]',
-        '[class*="Related"]',
-        '[class*="similar"]',
-        '[class*="Similar"]',
-        '[class*="recommendation"]',
-        '[class*="Recommendation"]',
-        '[class*="language-selector"]',
-        '[class*="LanguageSelector"]',
-        '[class*="lang-switch"]',
-        '[id*="cookie"]',
-        '[id*="banner"]',
-        '[id*="popup"]',
-        '[id*="modal"]',
-        '[id*="nav"]',
-        '[id*="menu"]',
-        '[id*="sidebar"]',
-        '[id*="footer"]',
-        '[id*="header"]',
+        '[class*="cookie"]', '[class*="Cookie"]', '[class*="banner"]', '[class*="Banner"]',
+        '[class*="popup"]', '[class*="Popup"]', '[class*="modal"]', '[class*="Modal"]',
+        '[class*="overlay"]', '[class*="Overlay"]', '[class*="sidebar"]', '[class*="Sidebar"]',
+        '[class*="footer"]', '[class*="Footer"]', '[class*="header"]', '[class*="Header"]',
+        '[class*="navbar"]', '[class*="Navbar"]', '[class*="nav-"]', '[class*="Nav-"]',
+        '[class*="menu"]', '[class*="Menu"]', '[class*="share"]', '[class*="Share"]',
+        '[class*="social"]', '[class*="Social"]', '[class*="breadcrumb"]', '[class*="Breadcrumb"]',
+        '[class*="related"]', '[class*="Related"]', '[class*="similar"]', '[class*="Similar"]',
+        '[class*="recommendation"]', '[class*="Recommendation"]',
+        '[class*="language-selector"]', '[class*="LanguageSelector"]',
+        '[id*="cookie"]', '[id*="banner"]', '[id*="popup"]', '[id*="modal"]',
+        '[id*="nav"]', '[id*="menu"]', '[id*="sidebar"]', '[id*="footer"]', '[id*="header"]',
     ];
 
     removeSelectors.forEach(selector => {
@@ -181,30 +103,12 @@ DOM_CLEANING_SCRIPT = """
             document.querySelectorAll(selector).forEach(el => el.remove());
         } catch (e) {}
     });
-
-    // Remove elements containing only navigation-like text
-    const navPatterns = [
-        /^(home|about|contact|careers|jobs|login|sign in|sign up|register|menu|search)$/i,
-        /^(english|español|français|deutsch|中文|日本語)$/i,
-    ];
-
-    document.querySelectorAll('a, button, span, li').forEach(el => {
-        const text = (el.innerText || '').trim();
-        if (text.length < 30) {
-            for (const pattern of navPatterns) {
-                if (pattern.test(text)) {
-                    el.remove();
-                    break;
-                }
-            }
-        }
-    });
 }
 """
 
 
 async def _handle_route(route: Route, request: PlaywrightRequest) -> None:
-    """Block only tracking/analytics."""
+    """Block tracking/analytics resources."""
     url = request.url.lower()
     if any(pattern in url for pattern in BLOCKED_URL_PATTERNS):
         await route.abort()
@@ -212,8 +116,19 @@ async def _handle_route(route: Route, request: PlaywrightRequest) -> None:
     await route.continue_()
 
 
-async def _create_stealth_context_and_page(browser: Browser, user_agent: str) -> Page:
-    """Create a new browser context and page with stealth settings."""
+async def _create_stealth_page(
+    browser: Browser,
+    stealth: Stealth | None = None,
+    user_agent: str | None = None,
+) -> Page:
+    """
+    Create a new browser context and page with stealth applied.
+
+    If using Stealth().use_async(), stealth is auto-applied to new contexts.
+    This function still sets up custom headers and resource blocking.
+    """
+    user_agent = user_agent or random.choice(USER_AGENTS)
+
     context = await browser.new_context(
         user_agent=user_agent,
         viewport={"width": 1920, "height": 1080},
@@ -241,8 +156,17 @@ async def _create_stealth_context_and_page(browser: Browser, user_agent: str) ->
         },
     )
 
+    # If stealth wasn't applied globally via use_async(), apply it manually
+    if stealth and hasattr(stealth, "apply_stealth_async"):
+        try:
+            await stealth.apply_stealth_async(context)
+            logger.debug("Stealth applied to context manually")
+        except Exception as e:
+            logger.debug(f"Stealth already applied or error: {e}")
+
     page = await context.new_page()
-    await page.add_init_script(STEALTH_SCRIPT)
+
+    # Set up resource blocking
     await page.route("**/*", _handle_route)
 
     return page
@@ -390,55 +314,43 @@ def _clean_extracted_text(text: str) -> str:
     lines = text.split("\n")
     cleaned_lines = []
 
-    # Patterns to skip
     skip_patterns = [
-        # JSON-like content
         re.compile(r"^\s*\{.*\}\s*$"),
         re.compile(r"^\s*\[.*\]\s*$"),
         re.compile(r'"[a-zA-Z_]+"\s*:\s*'),
-        # CSS-like content
         re.compile(r"var\s*\(\s*--"),
         re.compile(r"--[a-z-]+:\s*"),
         re.compile(r"^\s*#[0-9a-fA-F]{3,8}\s*$"),
-        # Navigation/menu items (repeated short items)
         re.compile(r"^-\s*$"),
         re.compile(
             r"^\s*-\s*(About|Home|Contact|Careers|Jobs|Menu|Search|Login|Sign)\s*$",
             re.I,
         ),
-        # Language selectors
         re.compile(
             r"^(English|Español|Français|Deutsch|中文|日本語|English-UK)\s*$", re.I
         ),
         re.compile(r"^(English\s+)+", re.I),
-        # Theme/config data
         re.compile(r"themeOptions|customTheme|varTheme", re.I),
         re.compile(r"pcsx-|primary-color|accent-color|button-", re.I),
-        # Empty or whitespace only
         re.compile(r"^\s*$"),
     ]
 
-    # Track repeated patterns (for nav menus that repeat)
     seen_short_lines = {}
 
     for line in lines:
         line = line.strip()
 
-        # Skip empty lines
         if not line:
             continue
 
-        # Skip lines matching noise patterns
         if any(p.search(line) for p in skip_patterns):
             continue
 
-        # Skip very short lines that repeat (navigation items)
         if len(line) < 50:
             seen_short_lines[line] = seen_short_lines.get(line, 0) + 1
             if seen_short_lines[line] > 2:
                 continue
 
-        # Skip lines that are mostly special characters
         alpha_ratio = sum(c.isalpha() or c.isspace() for c in line) / max(len(line), 1)
         if alpha_ratio < 0.5 and len(line) > 20:
             continue
@@ -446,19 +358,16 @@ def _clean_extracted_text(text: str) -> str:
         cleaned_lines.append(line)
 
     result = "\n".join(cleaned_lines)
-
-    # Remove multiple consecutive newlines
     result = re.sub(r"\n{3,}", "\n\n", result)
 
-    # Remove repeated sections (sometimes nav gets captured multiple times)
-    # Split into paragraphs and deduplicate
+    # Deduplicate paragraphs
     paragraphs = result.split("\n\n")
     seen_paragraphs = set()
     unique_paragraphs = []
 
     for para in paragraphs:
         para_normalized = " ".join(para.split()).lower()
-        if len(para_normalized) > 20:  # Only dedupe longer paragraphs
+        if len(para_normalized) > 20:
             if para_normalized not in seen_paragraphs:
                 seen_paragraphs.add(para_normalized)
                 unique_paragraphs.append(para)
@@ -473,21 +382,14 @@ def _clean_html_content(html: str) -> str:
     if not html:
         return ""
 
-    # Remove script tags with JSON content
     html = re.sub(
         r'<script[^>]*>[\s\S]*?\{[\s\S]*?"[a-zA-Z]+"[\s\S]*?\}[\s\S]*?</script>',
         "",
         html,
         flags=re.IGNORECASE,
     )
-
-    # Remove inline JSON
     html = re.sub(r'\{"\w+"\s*:\s*\{[^}]+\}[^}]*\}', "", html)
-
-    # Remove style tags
     html = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", html, flags=re.IGNORECASE)
-
-    # Remove noscript
     html = re.sub(r"<noscript[^>]*>[\s\S]*?</noscript>", "", html, flags=re.IGNORECASE)
 
     return html
@@ -495,7 +397,6 @@ def _clean_html_content(html: str) -> str:
 
 def _extract_with_trafilatura(html: str, output_format: str) -> str | None:
     """Synchronous trafilatura extraction."""
-    # Pre-clean HTML
     html = _clean_html_content(html)
 
     kwargs = {
@@ -524,7 +425,6 @@ def _extract_with_trafilatura(html: str, output_format: str) -> str | None:
             **kwargs,
         )
 
-    # Post-clean the result
     if result and output_format == "text":
         result = _clean_extracted_text(result)
 
@@ -542,14 +442,12 @@ async def _extract_content_async(html: str, output_format: str) -> str | None:
 
 async def _get_fallback_content(page: Page, output_format: str) -> str:
     """Fallback content extraction via JS."""
-    # First try to get job-specific content
     job_content = await _extract_job_content(page)
     if job_content and len(job_content) > 100:
         if output_format == "text":
             return _clean_extracted_text(job_content)
         return job_content
 
-    # Generic fallback
     if output_format == "html":
         result = await page.evaluate("""
             () => {
@@ -565,9 +463,7 @@ async def _get_fallback_content(page: Page, output_format: str) -> str:
                     '[class*="jobDescription"]',
                     '[class*="job-detail"]',
                     '[class*="position"]',
-                    'article',
-                    'main',
-                    '[role="main"]',
+                    'article', 'main', '[role="main"]',
                 ];
 
                 let el = null;
@@ -590,10 +486,17 @@ async def get_page_content(
     browser: Browser,
     output_format: Literal["text", "html"] = "text",
     timeout: int = 45000,
+    stealth: Stealth | None = None,
 ) -> str:
     """
-    Fetch and extract page content using Playwright.
-    Handles SPAs and cleans extracted content.
+    Fetch and extract page content using Playwright with stealth.
+
+    Args:
+        url: The URL to fetch
+        browser: Playwright browser instance
+        output_format: Output format - 'text' or 'html'
+        timeout: Navigation timeout in milliseconds
+        stealth: Optional Stealth instance for manual application
     """
     page: Page | None = None
 
@@ -601,8 +504,8 @@ async def get_page_content(
         user_agent = random.choice(USER_AGENTS)
         logger.info(f"Fetching: {url}")
 
-        # Create page
-        page = await _create_stealth_context_and_page(browser, user_agent)
+        # Create stealth page
+        page = await _create_stealth_page(browser, stealth, user_agent)
 
         # Navigate
         response = await _navigate_with_retry(page, url, timeout=timeout)
@@ -627,7 +530,7 @@ async def get_page_content(
         # Scroll to trigger lazy loading
         await _scroll_and_wait(page)
 
-        # Clean DOM before extraction
+        # Clean DOM
         await _clean_dom(page)
 
         # Try job-specific extraction first
@@ -641,7 +544,7 @@ async def get_page_content(
                     )
                     return cleaned
 
-        # Get HTML and extract with trafilatura
+        # Get HTML and extract
         html_content = await page.content()
 
         if not html_content or len(html_content.strip()) < 100:

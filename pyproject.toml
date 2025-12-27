@@ -9,7 +9,7 @@ dependencies = [
     "gunicorn>=23.0.0",
     "loguru>=0.7.3",
     "playwright>=1.55.0",
-    "playwright-stealth==1.0.6",
+    "playwright-stealth==2.0.0",
     "pydantic>=2.12.3",
     "pydantic-settings>=2.11.0",
     "redis[hiredis]>=7.0.1",

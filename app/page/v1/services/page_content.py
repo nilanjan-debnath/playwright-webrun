@@ -6,7 +6,6 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
     Error as PlaywrightError,
 )
-from playwright_stealth import stealth_async
 from app.core.logger import logger
 
 
@@ -39,7 +38,6 @@ async def run(browser: Browser, url: str, max_retries: int = 2) -> str:
             )
 
             page = await context.new_page()
-            await stealth_async(page)
 
             html = await _navigate_with_fallback(page, url, wait_strategies)
 
