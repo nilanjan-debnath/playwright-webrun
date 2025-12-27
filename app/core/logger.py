@@ -74,7 +74,7 @@ logger = get_logger()
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
-
+        # TODO: add debug message to display request and response payload
         logger.info(f"→ {request.method} {request.url.path}")
 
         try:

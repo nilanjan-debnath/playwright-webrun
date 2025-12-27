@@ -9,7 +9,7 @@ from app.core.logger import logger
 from app.core.config import settings
 from app.core.ratelimiter import limiter
 
-router = APIRouter(prefix="/api/v1/page", tags=["user", "v1"])
+router = APIRouter(prefix="/api/v1/page", tags=["page", "v1"])
 
 
 @router.get(
