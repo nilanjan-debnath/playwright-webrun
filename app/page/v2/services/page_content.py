@@ -1,5 +1,6 @@
 import random
 import asyncio
+import re
 from typing import Literal
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +27,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 ]
 
-# URL patterns to block (only tracking/ads - NOT resources needed for rendering)
+# URL patterns to block
 BLOCKED_URL_PATTERNS = (
     "google-analytics.com",
     "googletagmanager.com",
@@ -43,20 +44,35 @@ BLOCKED_URL_PATTERNS = (
     "nr-data.net",
 )
 
-# Content selectors to wait for
-CONTENT_SELECTORS = [
+# Content selectors for job pages (priority order)
+JOB_CONTENT_SELECTORS = [
     '[data-testid="job-detail"]',
-    ".job-description",
-    ".job-details",
-    ".position-description",
-    '[class*="JobDescription"]',
+    '[data-testid="job-description"]',
+    '[class*="job-description"]',
     '[class*="jobDescription"]',
+    '[class*="JobDescription"]',
+    '[class*="position-description"]',
+    '[class*="job-detail"]',
+    '[class*="jobDetail"]',
+    '[class*="job-content"]',
+    '[class*="jobContent"]',
+    '[class*="career-detail"]',
+    '[id*="job-description"]',
+    '[id*="jobDescription"]',
+    'article[class*="job"]',
+    'section[class*="job"]',
+    'div[class*="job"][class*="detail"]',
+]
+
+# Generic content selectors (fallback)
+GENERIC_CONTENT_SELECTORS = [
     "article",
     "main",
     '[role="main"]',
-    "#root > div > div",
-    "#app > div > div",
-    "#__next > div > div",
+    ".content",
+    "#content",
+    "#main-content",
+    ".main-content",
 ]
 
 # Stealth JavaScript
@@ -87,36 +103,116 @@ STEALTH_SCRIPT = """
 
     if (!window.chrome) window.chrome = {};
     window.chrome.runtime = { id: undefined };
+}
+"""
 
-    const originalQuery = window.navigator.permissions?.query;
-    if (originalQuery) {
-        window.navigator.permissions.query = (parameters) => (
-            parameters.name === 'notifications'
-                ? Promise.resolve({ state: Notification.permission })
-                : originalQuery(parameters)
-        );
-    }
+# DOM cleaning script - removes noise elements
+DOM_CLEANING_SCRIPT = """
+() => {
+    // Elements to completely remove
+    const removeSelectors = [
+        'script',
+        'style',
+        'noscript',
+        'iframe',
+        'svg',
+        'canvas',
+        'video',
+        'audio',
+        'nav',
+        'header',
+        'footer',
+        'aside',
+        '[role="navigation"]',
+        '[role="banner"]',
+        '[role="contentinfo"]',
+        '[role="complementary"]',
+        '[aria-hidden="true"]',
+        '[class*="cookie"]',
+        '[class*="Cookie"]',
+        '[class*="banner"]',
+        '[class*="Banner"]',
+        '[class*="popup"]',
+        '[class*="Popup"]',
+        '[class*="modal"]',
+        '[class*="Modal"]',
+        '[class*="overlay"]',
+        '[class*="Overlay"]',
+        '[class*="sidebar"]',
+        '[class*="Sidebar"]',
+        '[class*="footer"]',
+        '[class*="Footer"]',
+        '[class*="header"]',
+        '[class*="Header"]',
+        '[class*="navbar"]',
+        '[class*="Navbar"]',
+        '[class*="nav-"]',
+        '[class*="Nav-"]',
+        '[class*="menu"]',
+        '[class*="Menu"]',
+        '[class*="share"]',
+        '[class*="Share"]',
+        '[class*="social"]',
+        '[class*="Social"]',
+        '[class*="breadcrumb"]',
+        '[class*="Breadcrumb"]',
+        '[class*="related"]',
+        '[class*="Related"]',
+        '[class*="similar"]',
+        '[class*="Similar"]',
+        '[class*="recommendation"]',
+        '[class*="Recommendation"]',
+        '[class*="language-selector"]',
+        '[class*="LanguageSelector"]',
+        '[class*="lang-switch"]',
+        '[id*="cookie"]',
+        '[id*="banner"]',
+        '[id*="popup"]',
+        '[id*="modal"]',
+        '[id*="nav"]',
+        '[id*="menu"]',
+        '[id*="sidebar"]',
+        '[id*="footer"]',
+        '[id*="header"]',
+    ];
+
+    removeSelectors.forEach(selector => {
+        try {
+            document.querySelectorAll(selector).forEach(el => el.remove());
+        } catch (e) {}
+    });
+
+    // Remove elements containing only navigation-like text
+    const navPatterns = [
+        /^(home|about|contact|careers|jobs|login|sign in|sign up|register|menu|search)$/i,
+        /^(english|español|français|deutsch|中文|日本語)$/i,
+    ];
+
+    document.querySelectorAll('a, button, span, li').forEach(el => {
+        const text = (el.innerText || '').trim();
+        if (text.length < 30) {
+            for (const pattern of navPatterns) {
+                if (pattern.test(text)) {
+                    el.remove();
+                    break;
+                }
+            }
+        }
+    });
 }
 """
 
 
 async def _handle_route(route: Route, request: PlaywrightRequest) -> None:
-    """Block only tracking/analytics - allow everything else for SPAs."""
+    """Block only tracking/analytics."""
     url = request.url.lower()
-
-    # Only block known trackers/analytics
     if any(pattern in url for pattern in BLOCKED_URL_PATTERNS):
         await route.abort()
         return
-
     await route.continue_()
 
 
-async def _create_stealth_context_and_page(
-    browser: Browser,
-    user_agent: str,
-    block_resources: bool = True,
-) -> Page:
+async def _create_stealth_context_and_page(browser: Browser, user_agent: str) -> Page:
     """Create a new browser context and page with stealth settings."""
     context = await browser.new_context(
         user_agent=user_agent,
@@ -147,121 +243,93 @@ async def _create_stealth_context_and_page(
 
     page = await context.new_page()
     await page.add_init_script(STEALTH_SCRIPT)
-
-    if block_resources:
-        await page.route("**/*", _handle_route)
+    await page.route("**/*", _handle_route)
 
     return page
 
 
 async def _navigate_with_retry(
-    page: Page,
-    url: str,
-    timeout: int = 45000,
+    page: Page, url: str, timeout: int = 45000
 ) -> Response | None:
-    """
-    Navigate to URL with multiple strategies and retries.
-    """
+    """Navigate to URL with multiple strategies."""
     strategies = [
         {"wait_until": "commit", "timeout": timeout},
         {"wait_until": "domcontentloaded", "timeout": timeout},
-        {"wait_until": "load", "timeout": timeout},
     ]
 
     last_error = None
-    response = None
-
     for i, strategy in enumerate(strategies):
         try:
-            logger.debug(
-                f"Navigation attempt {i + 1} with strategy: {strategy['wait_until']}"
-            )
-
+            logger.debug(f"Navigation attempt {i + 1}: {strategy['wait_until']}")
             response = await page.goto(url, **strategy)
 
-            # If we got here with "commit", wait a bit for content
             if strategy["wait_until"] == "commit":
                 try:
                     await page.wait_for_load_state("domcontentloaded", timeout=15000)
                 except Exception:
-                    pass  # Continue anyway
+                    pass
 
             return response
 
         except Exception as e:
             last_error = e
             error_msg = str(e).lower()
-
-            # If it's a definitive error, don't retry
             if any(
                 x in error_msg
                 for x in ["net::err_name_not_resolved", "net::err_connection_refused"]
             ):
                 raise
 
-            logger.warning(f"Navigation attempt {i + 1} failed: {type(e).__name__}")
-
-            # Small delay before retry
             if i < len(strategies) - 1:
                 await asyncio.sleep(1)
-                continue
 
-    # All strategies failed
     if last_error:
         raise last_error
-
-    return response
+    return None
 
 
 async def _wait_for_content_render(page: Page, timeout: int = 20000) -> bool:
-    """
-    Wait for meaningful content to render on the page.
-    Returns True if content found, False otherwise.
-    """
-    start_time = asyncio.get_event_loop().time()
-
-    # Try to wait for network idle first (with short timeout)
+    """Wait for content to render."""
     try:
         await page.wait_for_load_state("networkidle", timeout=min(timeout, 10000))
     except Exception:
         pass
 
-    # Try content selectors
-    for selector in CONTENT_SELECTORS:
+    # Try job-specific selectors first
+    for selector in JOB_CONTENT_SELECTORS:
         try:
             await page.wait_for_selector(selector, timeout=2000, state="attached")
-            logger.debug(f"Found content selector: {selector}")
+            logger.debug(f"Found job content: {selector}")
             return True
         except Exception:
             continue
 
-    # Wait for substantial text content
-    remaining = timeout - int((asyncio.get_event_loop().time() - start_time) * 1000)
-    if remaining > 0:
+    # Try generic selectors
+    for selector in GENERIC_CONTENT_SELECTORS:
         try:
-            await page.wait_for_function(
-                """() => {
-                    const text = document.body?.innerText || '';
-                    return text.length > 300;
-                }""",
-                timeout=remaining,
-            )
+            await page.wait_for_selector(selector, timeout=1500, state="attached")
             return True
         except Exception:
-            pass
+            continue
 
-    return False
+    # Wait for text content
+    try:
+        await page.wait_for_function(
+            "() => (document.body?.innerText || '').length > 300",
+            timeout=5000,
+        )
+        return True
+    except Exception:
+        return False
 
 
 async def _scroll_and_wait(page: Page) -> None:
-    """Scroll page to trigger lazy loading."""
+    """Scroll to trigger lazy loading."""
     try:
         await page.evaluate("""
             async () => {
                 const delay = ms => new Promise(r => setTimeout(r, ms));
-                const height = Math.max(document.body.scrollHeight, 2000);
-
-                for (let y = 0; y < height; y += 400) {
+                for (let y = 0; y < Math.min(document.body.scrollHeight, 3000); y += 400) {
                     window.scrollTo(0, y);
                     await delay(100);
                 }
@@ -270,23 +338,42 @@ async def _scroll_and_wait(page: Page) -> None:
         """)
     except Exception:
         pass
-
     await asyncio.sleep(0.5)
 
 
+async def _clean_dom(page: Page) -> None:
+    """Clean the DOM by removing noise elements."""
+    try:
+        await page.evaluate(DOM_CLEANING_SCRIPT)
+    except Exception as e:
+        logger.debug(f"DOM cleaning error: {e}")
+
+
+async def _extract_job_content(page: Page) -> str | None:
+    """Try to extract job-specific content directly."""
+    for selector in JOB_CONTENT_SELECTORS:
+        try:
+            element = await page.query_selector(selector)
+            if element:
+                text = await element.inner_text()
+                if text and len(text.strip()) > 100:
+                    logger.debug(f"Extracted from selector: {selector}")
+                    return text.strip()
+        except Exception:
+            continue
+    return None
+
+
 async def _check_real_404(page: Page) -> bool:
-    """Check if page is a real 404 vs soft 404 with content."""
+    """Check if page is a real 404."""
     try:
         return await page.evaluate("""
             () => {
                 const text = (document.body?.innerText || '').toLowerCase();
-
                 if (text.length < 300) {
                     const notFound = ['page not found', '404', 'not found', 'does not exist'];
                     return notFound.some(s => text.includes(s));
                 }
-
-                // Check for job-related content
                 const jobTerms = ['apply', 'description', 'responsibilities', 'qualifications', 'requirements', 'experience'];
                 return !jobTerms.some(t => text.includes(t));
             }
@@ -295,31 +382,153 @@ async def _check_real_404(page: Page) -> bool:
         return True
 
 
+def _clean_extracted_text(text: str) -> str:
+    """Clean up extracted text by removing noise patterns."""
+    if not text:
+        return ""
+
+    lines = text.split("\n")
+    cleaned_lines = []
+
+    # Patterns to skip
+    skip_patterns = [
+        # JSON-like content
+        re.compile(r"^\s*\{.*\}\s*$"),
+        re.compile(r"^\s*\[.*\]\s*$"),
+        re.compile(r'"[a-zA-Z_]+"\s*:\s*'),
+        # CSS-like content
+        re.compile(r"var\s*\(\s*--"),
+        re.compile(r"--[a-z-]+:\s*"),
+        re.compile(r"^\s*#[0-9a-fA-F]{3,8}\s*$"),
+        # Navigation/menu items (repeated short items)
+        re.compile(r"^-\s*$"),
+        re.compile(
+            r"^\s*-\s*(About|Home|Contact|Careers|Jobs|Menu|Search|Login|Sign)\s*$",
+            re.I,
+        ),
+        # Language selectors
+        re.compile(
+            r"^(English|Español|Français|Deutsch|中文|日本語|English-UK)\s*$", re.I
+        ),
+        re.compile(r"^(English\s+)+", re.I),
+        # Theme/config data
+        re.compile(r"themeOptions|customTheme|varTheme", re.I),
+        re.compile(r"pcsx-|primary-color|accent-color|button-", re.I),
+        # Empty or whitespace only
+        re.compile(r"^\s*$"),
+    ]
+
+    # Track repeated patterns (for nav menus that repeat)
+    seen_short_lines = {}
+
+    for line in lines:
+        line = line.strip()
+
+        # Skip empty lines
+        if not line:
+            continue
+
+        # Skip lines matching noise patterns
+        if any(p.search(line) for p in skip_patterns):
+            continue
+
+        # Skip very short lines that repeat (navigation items)
+        if len(line) < 50:
+            seen_short_lines[line] = seen_short_lines.get(line, 0) + 1
+            if seen_short_lines[line] > 2:
+                continue
+
+        # Skip lines that are mostly special characters
+        alpha_ratio = sum(c.isalpha() or c.isspace() for c in line) / max(len(line), 1)
+        if alpha_ratio < 0.5 and len(line) > 20:
+            continue
+
+        cleaned_lines.append(line)
+
+    result = "\n".join(cleaned_lines)
+
+    # Remove multiple consecutive newlines
+    result = re.sub(r"\n{3,}", "\n\n", result)
+
+    # Remove repeated sections (sometimes nav gets captured multiple times)
+    # Split into paragraphs and deduplicate
+    paragraphs = result.split("\n\n")
+    seen_paragraphs = set()
+    unique_paragraphs = []
+
+    for para in paragraphs:
+        para_normalized = " ".join(para.split()).lower()
+        if len(para_normalized) > 20:  # Only dedupe longer paragraphs
+            if para_normalized not in seen_paragraphs:
+                seen_paragraphs.add(para_normalized)
+                unique_paragraphs.append(para)
+        else:
+            unique_paragraphs.append(para)
+
+    return "\n\n".join(unique_paragraphs).strip()
+
+
+def _clean_html_content(html: str) -> str:
+    """Pre-clean HTML before trafilatura processing."""
+    if not html:
+        return ""
+
+    # Remove script tags with JSON content
+    html = re.sub(
+        r'<script[^>]*>[\s\S]*?\{[\s\S]*?"[a-zA-Z]+"[\s\S]*?\}[\s\S]*?</script>',
+        "",
+        html,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove inline JSON
+    html = re.sub(r'\{"\w+"\s*:\s*\{[^}]+\}[^}]*\}', "", html)
+
+    # Remove style tags
+    html = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", html, flags=re.IGNORECASE)
+
+    # Remove noscript
+    html = re.sub(r"<noscript[^>]*>[\s\S]*?</noscript>", "", html, flags=re.IGNORECASE)
+
+    return html
+
+
 def _extract_with_trafilatura(html: str, output_format: str) -> str | None:
     """Synchronous trafilatura extraction."""
+    # Pre-clean HTML
+    html = _clean_html_content(html)
+
     kwargs = {
         "include_tables": True,
         "include_comments": False,
         "favor_recall": True,
         "deduplicate": True,
+        "no_fallback": False,
     }
 
     if output_format == "html":
-        return trafilatura.extract(
+        result = trafilatura.extract(
             html,
             output_format="html",
             include_links=True,
-            include_images=True,
+            include_images=False,
             include_formatting=True,
             **kwargs,
         )
-    return trafilatura.extract(
-        html,
-        output_format="txt",
-        include_links=False,
-        include_images=False,
-        **kwargs,
-    )
+    else:
+        result = trafilatura.extract(
+            html,
+            output_format="txt",
+            include_links=False,
+            include_images=False,
+            **kwargs,
+        )
+
+    # Post-clean the result
+    if result and output_format == "text":
+        result = _clean_extracted_text(result)
+
+    return result
 
 
 async def _extract_content_async(html: str, output_format: str) -> str | None:
@@ -333,29 +542,47 @@ async def _extract_content_async(html: str, output_format: str) -> str | None:
 
 async def _get_fallback_content(page: Page, output_format: str) -> str:
     """Fallback content extraction via JS."""
+    # First try to get job-specific content
+    job_content = await _extract_job_content(page)
+    if job_content and len(job_content) > 100:
+        if output_format == "text":
+            return _clean_extracted_text(job_content)
+        return job_content
+
+    # Generic fallback
     if output_format == "html":
-        return await page.evaluate("""
+        result = await page.evaluate("""
             () => {
-                const el = document.querySelector('article, main, [role="main"], [class*="job"], [class*="content"]') || document.body;
+                const el = document.querySelector('article, main, [role="main"]') || document.body;
                 return el?.innerHTML || '';
             }
         """)
+    else:
+        result = await page.evaluate("""
+            () => {
+                const selectors = [
+                    '[class*="job-description"]',
+                    '[class*="jobDescription"]',
+                    '[class*="job-detail"]',
+                    '[class*="position"]',
+                    'article',
+                    'main',
+                    '[role="main"]',
+                ];
 
-    return await page.evaluate("""
-        () => {
-            const selectors = ['article', 'main', '[role="main"]', '[class*="job"]', '[class*="content"]'];
-            let el = null;
-            for (const s of selectors) {
-                el = document.querySelector(s);
-                if (el) break;
+                let el = null;
+                for (const s of selectors) {
+                    el = document.querySelector(s);
+                    if (el && el.innerText.length > 200) break;
+                }
+                if (!el) el = document.body;
+
+                return (el.innerText || '').trim();
             }
-            if (!el) el = document.body;
+        """)
+        result = _clean_extracted_text(result)
 
-            const clone = el.cloneNode(true);
-            clone.querySelectorAll('script, style, noscript, iframe, nav, header, footer, aside').forEach(e => e.remove());
-            return (clone.innerText || '').trim();
-        }
-    """)
+    return result or ""
 
 
 async def get_page_content(
@@ -366,7 +593,7 @@ async def get_page_content(
 ) -> str:
     """
     Fetch and extract page content using Playwright.
-    Handles SPAs and JavaScript-heavy sites with retry strategies.
+    Handles SPAs and cleans extracted content.
     """
     page: Page | None = None
 
@@ -374,25 +601,18 @@ async def get_page_content(
         user_agent = random.choice(USER_AGENTS)
         logger.info(f"Fetching: {url}")
 
-        # Create page with stealth settings
+        # Create page
         page = await _create_stealth_context_and_page(browser, user_agent)
 
-        # Navigate with retry strategies
+        # Navigate
         response = await _navigate_with_retry(page, url, timeout=timeout)
-
-        # Get status code (may be None for some navigations)
         status_code = response.status if response else 200
 
-        # Wait for content to render
-        logger.debug("Waiting for content to render...")
-        content_found = await _wait_for_content_render(page, timeout=20000)
+        # Wait for content
+        logger.debug("Waiting for content...")
+        await _wait_for_content_render(page, timeout=20000)
 
-        if not content_found:
-            logger.warning(
-                f"Content selectors not found for {url}, continuing anyway..."
-            )
-
-        # Handle HTTP errors - but check for real 404 on SPAs
+        # Handle HTTP errors
         if status_code >= 400:
             is_real_404 = await _check_real_404(page)
             if is_real_404:
@@ -402,12 +622,26 @@ async def get_page_content(
                     else status.HTTP_502_BAD_GATEWAY,
                     detail=f"Target URL returned HTTP {status_code}",
                 )
-            logger.info(f"Soft {status_code} detected, page has content")
+            logger.info(f"Soft {status_code}, page has content")
 
         # Scroll to trigger lazy loading
         await _scroll_and_wait(page)
 
-        # Get HTML content
+        # Clean DOM before extraction
+        await _clean_dom(page)
+
+        # Try job-specific extraction first
+        if output_format == "text":
+            job_content = await _extract_job_content(page)
+            if job_content and len(job_content) > 200:
+                cleaned = _clean_extracted_text(job_content)
+                if len(cleaned) > 150:
+                    logger.info(
+                        f"Success (job selector): {url} (length={len(cleaned)})"
+                    )
+                    return cleaned
+
+        # Get HTML and extract with trafilatura
         html_content = await page.content()
 
         if not html_content or len(html_content.strip()) < 100:
@@ -419,15 +653,15 @@ async def get_page_content(
         # Extract with trafilatura
         extracted = await _extract_content_async(html_content, output_format)
 
-        # Fallback if trafilatura fails
+        # Fallback if needed
         if not extracted or len(extracted.strip()) < 50:
-            logger.warning(f"Using fallback extraction for {url}")
+            logger.warning(f"Using fallback for {url}")
             extracted = await _get_fallback_content(page, output_format)
 
         if not extracted or not extracted.strip():
             raise HTTPException(
                 status_code=status.HTTP_204_NO_CONTENT,
-                detail="Could not extract content from page",
+                detail="Could not extract content",
             )
 
         logger.info(f"Success: {url} (length={len(extracted)})")
@@ -444,7 +678,7 @@ async def get_page_content(
         )
 
     except Exception as e:
-        logger.error(f"Error fetching {url}: {e!r}", exc_info=True)
+        logger.error(f"Error: {url}: {e!r}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch: {type(e).__name__}",
