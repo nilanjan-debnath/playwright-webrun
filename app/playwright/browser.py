@@ -8,26 +8,21 @@ async def start_browser() -> tuple[Playwright, Browser]:
 
     browser_args = [
         "--disable-blink-features=AutomationControlled",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--disable-web-security",
-        "--disable-setuid-sandbox",
-        "--no-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
         "--disable-gpu",
         "--window-size=1920,1080",
-        "--start-maximized",
-        "--ignore-certificate-errors",
-        "--allow-running-insecure-content",
         "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
-        "--disable-infobars",
-        "--hide-scrollbars",
-        "--mute-audio",
     ]
 
-    browser: Browser = await playwright.chromium.launch(args=browser_args)
+    browser: Browser = await playwright.chromium.launch(
+        args=browser_args,
+        headless=True,  # Set to False for debugging
+        timeout=60000,  # Increase launch timeout
+    )
     return playwright, browser
 
 
