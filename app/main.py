@@ -5,6 +5,7 @@ from app.core.ratelimiter import limiter
 from app.core.lifecycle import lifespan
 from app.core.logger import logger, LoggingMiddleware
 from app.page.v1.controllers.routes import router as page_v1_router
+from app.page.v2.controllers.routes import router as page_v2_router
 from app.playwright.browser import AppBrowser
 from app.page.v1.services.page_content import get_page_content
 from fastapi import HTTPException, status
@@ -32,6 +33,7 @@ app.add_middleware(LoggingMiddleware)
 
 
 app.include_router(page_v1_router)
+app.include_router(page_v2_router)
 
 
 @app.get("/")

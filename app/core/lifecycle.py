@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from playwright.async_api import async_playwright, Browser, Playwright
+from app.playwright.browser import start_browser
 from app.core.logger import logger
 
 # Store instances in a dictionary to be attached to app.state
@@ -15,31 +15,7 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI app starting up...")
     try:
         logger.info("Starting Playwright...")
-        playwright: Playwright = await async_playwright().start()
-
-        # Add the stealth arguments from your debug.py
-        browser_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-web-security",
-            "--disable-setuid-sandbox",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-accelerated-2d-canvas",
-            "--disable-gpu",
-            "--window-size=1920,1080",
-            "--start-maximized",
-            "--ignore-certificate-errors",
-            "--allow-running-insecure-content",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            "--disable-infobars",
-            "--hide-scrollbars",
-            "--mute-audio",
-        ]
-
-        browser: Browser = await playwright.chromium.launch(args=browser_args)
+        playwright, browser = await start_browser()
 
         # Store instances in the state dictionary
         playwright_state["playwright"] = playwright
@@ -49,9 +25,7 @@ async def lifespan(app: FastAPI):
         app.state.playwright = playwright
         app.state.browser = browser
 
-        logger.info(
-            f"Playwright started and browser launched successfully with args: {browser_args}"
-        )
+        logger.info("Playwright started and browser launched successfully")
         yield
 
     finally:

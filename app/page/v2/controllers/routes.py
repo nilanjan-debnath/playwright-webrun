@@ -1,15 +1,15 @@
 from fastapi import APIRouter, Request, status, HTTPException, Query
 from pydantic import AnyHttpUrl
-from app.page.v1.services.page_content import get_page_content
-from app.page.v1.services.network_logs import get_network_logs
-from app.page.v1.models.logs import DebugResponse
+from app.page.v2.services.page_content import get_page_content
+from app.page.v2.services.network_logs import get_network_logs
+from app.page.v2.models.logs import DebugResponse
 from app.playwright.browser import AppBrowser
 from playwright.async_api import Error as PlaywrightError
 from app.core.logger import logger
 from app.core.config import settings
 from app.core.ratelimiter import limiter
 
-router = APIRouter(prefix="/api/v1/page", tags=["page", "v1"])
+router = APIRouter(prefix="/api/v2/page", tags=["page", "v2"])
 
 
 @router.get(
